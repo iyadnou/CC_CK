@@ -9,4 +9,5 @@ colcon build --symlink-install
 source install/setup.bash
 ## 4. Launch
 ros2 launch ntu_robotsim_octomap navigation.launch.py
-
+## For Robot to Move
+ros2 launch explore_lite explore.launch.py
