@@ -66,6 +66,9 @@ def generate_launch_description():
         arguments=['0', '0', '0', '0', '0', '0', 'map', 'odom']
     )
 
+
+
+
     return LaunchDescription([
         launch_maze,
         launch_robot,
@@ -73,5 +76,5 @@ def generate_launch_description():
         launch_octomap,
         run_rviz,
         launch_nav2,
-        static_map_tf
+        static_map_tf,
     ])

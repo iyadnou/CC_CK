@@ -11,12 +11,14 @@ def generate_launch_description():
             description='Logging level',
         ),
         Node(
-            package='odom_to_tf_ros2', 
-            executable='odom_to_tf',   
+            package='odom_to_tf_ros2',
+            executable='odom_to_tf',
             name='odom_to_tf',
             output='screen',
             parameters=[
                 {'odom_topic': '/odom_ground_truth'},
+                {'frame_id': 'odom'},
+                {'child_frame_id': 'base_link'},
                 {'use_sim_time': True},
             ],
             arguments=['--ros-args', '--log-level', LaunchConfiguration('log_level')]
@@ -26,10 +28,10 @@ def generate_launch_description():
             executable='static_transform_publisher',
             name='static_transform_publisher',
             arguments=[
-                '0', '0', '0',  # Translation: x y z
-                '0', '0', '0', '1',  # Rotation: qx qy qz qw
-                'base_link',  # Parent frame
-                'realsense'  # Child frame
+                '0', '0', '0',
+                '0', '0', '0', '1',
+                'base_link',
+                'realsense'
             ],
             parameters=[
                 {'use_sim_time': True},
