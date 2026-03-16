@@ -54,7 +54,21 @@ class LandmarkCounterNode(Node):
         self.last_recorded_time = {}
         self.record_cooldown = 5.0 # Wait 5 seconds before recording the same sign again
 
-        # --- COURSEWORK REQUIREMENT #6: TRAFFIC RULES PUBLISHER ---
+
+        # Traffic-rule state
+        self.NORMAL_SPEED = 0.25
+        self.SLOW_SPEED = 0.20
+        self.FAST_SPEED = 0.30
+
+        self.current_mode = "NORMAL"
+        self.current_nav2_speed = self.NORMAL_SPEED
+
+        # Stop behavior
+        self.stop_active_until = 0.0
+        self.stop_hold_time = 3.0  # seconds to hold stop once sign is seen
+
+        # Publishers / Subscribers / Services
+
         self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         
         # Client to dynamically change Nav2 speeds
