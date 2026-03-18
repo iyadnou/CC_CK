@@ -21,7 +21,7 @@ def generate_launch_description():
 
     # Safely resolve home directory for the model path
     home_dir = os.path.expanduser('~')
-    model_absolute_path = os.path.join(home_dir, 'ros2_ws/custom_models/best.pt')
+    model_absolute_path = os.path.join(home_dir, 'ros2_ws/src/custom_models/best.pt')
 
     # Launch Custom YOLO Counting Node
     yolo_counter_node = Node(
