@@ -13,6 +13,12 @@ install(DIRECTORY
   DESTINATION share/${PROJECT_NAME}
 )
 
+# Install Python scripts
+install(PROGRAMS
+  scripts/landmark_counter.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 # setup the environmental hooks for the Gazebo resource path
 ament_environment_hooks("${CMAKE_CURRENT_SOURCE_DIR}/hooks/gz_sim_resource_path.dsv.in")
 
