@@ -43,7 +43,7 @@ class LandmarkCounterNode(Node):
 
         # --- LANDMARK DATABASE (CSV TEXT FILE) ---
         home_dir = os.path.expanduser('~')
-        self.db_path = os.path.join(home_dir, 'landmark_database.csv')
+        self.db_path = os.path.join(home_dir, 'ros2_ws', 'src', 'landmark_database.csv')
         
         # Create the file and write a header if it doesn't exist yet
         if not os.path.exists(self.db_path):
