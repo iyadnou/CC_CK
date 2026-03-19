@@ -4,6 +4,7 @@ from launch import LaunchDescription
 from launch.actions import IncludeLaunchDescription, SetEnvironmentVariable
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
+from launch.actions import ExecuteProcess
 
 def generate_launch_description():
     # Force CPU at the environment level
@@ -21,7 +22,7 @@ def generate_launch_description():
 
     # Safely resolve home directory for the model path
     home_dir = os.path.expanduser('~')
-    model_absolute_path = os.path.join(home_dir, 'ros2_ws/src/custom_models/best.pt')
+    model_absolute_path = os.path.join(home_dir, 'ros2_ws/src/custom_models/best(1).pt')
 
     # Launch Custom YOLO Counting Node
     yolo_counter_node = Node(
@@ -46,10 +47,21 @@ def generate_launch_description():
         prefix='xterm -e'
     )
 
+    wall_follower_process = ExecuteProcess(
+        cmd=[
+            'python3', '-u',
+            os.path.join(
+                os.path.expanduser('~'),
+                'ros2_ws/src/ntu_robotsim_octomap/launch/wall_follower.py'
+            )
+        ],
+        output='screen'
+    )
 
     return LaunchDescription([
         disable_cuda,
         navigation_launch,
         yolo_counter_node,
-	teleop_node
+	teleop_node,
+        wall_follower_process
     ])
