@@ -9,6 +9,4 @@ colcon build --symlink-install
 source install/setup.bash
 ## 4. Launch
 ros2 launch ntu_robotsim_octomap nav_and_yolo.launch.py
-## 5. Autonomous Driving
-python3 -u ~/ros2_ws/ntu_robotsim_octomap/launch/wall_follower.py
 
