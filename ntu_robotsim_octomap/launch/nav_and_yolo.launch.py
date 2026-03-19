@@ -35,7 +35,8 @@ def generate_launch_description():
             'device': 'cpu',
             'threshold': 0.5,
             'input_image_topic': '/rgbd_camera/image'
-        }]
+        }],
+	prefix='python3 -u'
     )
 
     # Launch teleop for debugging/ moving robot around
