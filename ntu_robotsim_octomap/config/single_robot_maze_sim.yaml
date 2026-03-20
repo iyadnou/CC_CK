@@ -5,13 +5,13 @@ spawn_robot:
     world: "cwmaze" # name of the world in which the robot should be spawned
     use_imu: true
     # start pose of the robot (atlas) in the world -7.0 0.0 3.96 0.0 0.0 0.0
+
     x: "-3.0"
     y: "3.0"
     z: "0.2"
     roll: "0.0"
     pitch: "0.0"
-    yaw: "1.57"
-    
+    yaw: "-0.2"    
 teleop_joy:
   ros__parameters:
     enable_teleop_joy: false
