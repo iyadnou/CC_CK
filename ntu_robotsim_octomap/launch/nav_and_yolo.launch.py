@@ -31,10 +31,11 @@ def generate_launch_description():
         name='landmark_counter_node',
         output='screen',
         parameters=[{
-            'model_path': model_absolute_path,
-            'device': 'cpu',
-            'threshold': 0.5,
-            'input_image_topic': '/rgbd_camera/image'
+    	    'model_path': model_absolute_path,
+    	    'device': 'cpu',
+    	    'threshold': 0.5,
+    	    'input_image_topic': '/rgbd_camera/image',
+    	    'odom_topic': '/odom_ground_truth'
         }],
 	prefix='python3 -u'
     )

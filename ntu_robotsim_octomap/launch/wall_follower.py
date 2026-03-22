@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+
 import math
 import time
 from collections import deque
@@ -10,7 +11,9 @@ from rclpy.action import ActionClient
 
 from nav_msgs.msg import OccupancyGrid, Odometry
 from nav2_msgs.action import NavigateToPose
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, Twist
+from sensor_msgs.msg import LaserScan
+from std_msgs.msg import Bool
 
 
 class FrontierExplorer(Node):
@@ -19,6 +22,9 @@ class FrontierExplorer(Node):
 
         self.map_topic = '/projected_map'
         self.odom_topic = '/odom_ground_truth'
+        self.scan_topic = '/scan'
+        self.cmd_vel_topic = '/cmd_vel'
+        self.traffic_stop_topic = '/traffic_stop'
 
         map_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
@@ -34,11 +40,23 @@ class FrontierExplorer(Node):
             depth=10,
         )
 
+        scan_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10,
+        )
+
         self.create_subscription(OccupancyGrid, self.map_topic, self.map_callback, map_qos)
         self.create_subscription(Odometry, self.odom_topic, self.odom_callback, odom_qos)
+        self.create_subscription(LaserScan, self.scan_topic, self.scan_callback, scan_qos)
+        self.create_subscription(Bool, self.traffic_stop_topic, self.traffic_stop_callback, 10)
 
         self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+        self.cmd_pub = self.create_publisher(Twist, self.cmd_vel_topic, 10)
 
+        self.traffic_stop = False
+
+        # ===== Map state =====
         self.map_data = None
         self.map_width = 0
         self.map_height = 0
@@ -46,10 +64,12 @@ class FrontierExplorer(Node):
         self.map_origin_x = 0.0
         self.map_origin_y = 0.0
 
+        # ===== Robot pose =====
         self.robot_x = None
         self.robot_y = None
         self.robot_yaw = None
 
+        # ===== Current Nav2 goal =====
         self.goal_x = None
         self.goal_y = None
         self.goal_cluster_id = None
@@ -57,18 +77,20 @@ class FrontierExplorer(Node):
         self.goal_active = False
         self.current_goal_handle = None
 
+        # ===== Frontier exploration tuning =====
         self.occ_threshold = 50
         self.safety_radius_cells = 2
 
-        self.min_goal_dist = 1.2
-        self.max_goal_dist = 8.0
+        self.min_goal_dist = 1.8
+        self.max_goal_dist = 10.0
 
-        self.frontier_min_cluster_size = 8
+        self.frontier_min_cluster_size = 20
         self.frontier_search_window_cells = 200
 
         self.last_log_time = 0.0
         self.have_logged_map = False
         self.have_logged_odom = False
+        self.have_logged_scan = False
 
         self.last_progress_x = None
         self.last_progress_y = None
@@ -79,13 +101,68 @@ class FrontierExplorer(Node):
         self.rejected_clusters = {}
         self.reject_duration = 45.0
 
-        self.timer = self.create_timer(1.0, self.control_loop)
+        # Temporary rejection of goals near recent wall-follow exit positions
+        self.rejected_frontier_positions = []
+        self.reject_position_radius = 1.5
+        self.reject_position_duration = 40.0
 
-        self.get_logger().info('Nav2 frontier explorer started')
-        self.get_logger().info(f'Subscribing to map:  {self.map_topic}')
-        self.get_logger().info(f'Subscribing to odom: {self.odom_topic}')
+        # ===== Hybrid supervisor mode =====
+        self.mode = 'EXPLORE_WITH_NAV2'
+        self.mode_since = time.time()
+
+        # ===== Wall-follow scan state =====
+        self.front_dist = float('inf')
+        self.front_right_dist = float('inf')
+        self.right_dist = float('inf')
+        self.scan_ok = False
+
+        # ===== Wall-follow state machine =====
+        self.wall_state = 'SEARCH_FOR_WALL'
+        self.wall_state_since = time.time()
+
+        # ===== Wall-follow tuning =====
+        self.desired_right_dist = 0.55
+        self.front_block_enter = 0.50
+        self.front_block_exit = 0.68
+
+        self.wall_lost_enter = 0.95
+        self.wall_lost_exit = 0.75
+
+        self.linear_follow = 0.12
+        self.linear_search = 0.06
+        self.angular_turn = 0.42
+        self.angular_search = -0.22
+        self.max_follow_angular = 0.35
+
+        self.kp = 1.2
+        self.kd = 0.18
+
+        self.min_state_time = 0.35
+        self.max_range_cap = 3.5
+
+        self.prev_error = 0.0
+        self.prev_wall_time = time.time()
+
+        # ===== Hybrid switching thresholds =====
+        self.wall_follow_enter_front = 0.45
+        self.wall_follow_enter_right = 0.60
+        self.wall_follow_exit_front = 1.20
+        self.wall_follow_exit_right = 1.40
+        self.wall_follow_min_time = 4.0
+
+        self.timer = self.create_timer(0.1, self.control_loop)
+
+        self.get_logger().info('Hybrid frontier explorer started')
+        self.get_logger().info(f'Map topic:  {self.map_topic}')
+        self.get_logger().info(f'Odom topic: {self.odom_topic}')
+        self.get_logger().info(f'Scan topic: {self.scan_topic}')
+        self.get_logger().info(f'Cmd topic:  {self.cmd_vel_topic}')
+        self.get_logger().info(f'Traffic stop topic: {self.traffic_stop_topic}')
         self.get_logger().info('Using Nav2 action: navigate_to_pose')
 
+    # =========================================================
+    # Basic callbacks
+    # =========================================================
     def map_callback(self, msg: OccupancyGrid):
         self.map_width = msg.info.width
         self.map_height = msg.info.height
@@ -115,6 +192,34 @@ class FrontierExplorer(Node):
             )
             self.have_logged_odom = True
 
+    def scan_callback(self, msg: LaserScan):
+        self.front_dist = self.min_in_sector(msg, -0.28, 0.28)
+        self.front_right_dist = self.min_in_sector(msg, -0.95, -0.35)
+        self.right_dist = self.min_in_sector(msg, -1.75, -1.10)
+        self.scan_ok = True
+
+        if not self.have_logged_scan:
+            self.get_logger().info(
+                f'Received scan: front={self.front_dist:.2f}, '
+                f'front_right={self.front_right_dist:.2f}, right={self.right_dist:.2f}'
+            )
+            self.have_logged_scan = True
+
+    def traffic_stop_callback(self, msg: Bool):
+        previous = self.traffic_stop
+        self.traffic_stop = msg.data
+
+        if self.traffic_stop and not previous:
+            self.get_logger().warn('Traffic stop active -> stopping exploration')
+            self.cancel_current_goal()
+            self.stop_robot()
+
+        elif (not self.traffic_stop) and previous:
+            self.get_logger().info('Traffic stop cleared -> resuming exploration')
+
+    # =========================================================
+    # General helpers
+    # =========================================================
     def normalize_angle(self, a: float):
         while a > math.pi:
             a -= 2.0 * math.pi
@@ -160,6 +265,9 @@ class FrontierExplorer(Node):
                 if 0 <= nx < self.map_width and 0 <= ny < self.map_height:
                     yield nx, ny
 
+    # =========================================================
+    # Frontier exploration
+    # =========================================================
     def is_frontier_cell(self, mx: int, my: int):
         if not self.is_free(mx, my):
             return False
@@ -181,6 +289,35 @@ class FrontierExplorer(Node):
         expired = [k for k, t in self.rejected_clusters.items() if t < now]
         for k in expired:
             del self.rejected_clusters[k]
+
+    def cleanup_rejected_positions(self):
+        now = time.time()
+        self.rejected_frontier_positions = [
+            item for item in self.rejected_frontier_positions
+            if item['until'] > now
+        ]
+
+    def reject_frontiers_near_current_pose(self):
+        if self.robot_x is None or self.robot_y is None:
+            return
+
+        self.rejected_frontier_positions.append({
+            'x': self.robot_x,
+            'y': self.robot_y,
+            'until': time.time() + self.reject_position_duration,
+        })
+
+        self.get_logger().info(
+            f'Temporarily rejecting frontier goals near '
+            f'({self.robot_x:.2f}, {self.robot_y:.2f})'
+        )
+
+    def is_near_rejected_position(self, x, y):
+        self.cleanup_rejected_positions()
+        for item in self.rejected_frontier_positions:
+            if math.hypot(x - item['x'], y - item['y']) < self.reject_position_radius:
+                return True
+        return False
 
     def find_frontier_clusters(self):
         if self.map_data is None or self.robot_x is None or self.robot_y is None:
@@ -249,13 +386,26 @@ class FrontierExplorer(Node):
             return None
 
         wx, wy = goal
+
+        if self.is_near_rejected_position(wx, wy):
+            return None
+
         dist = math.hypot(wx - self.robot_x, wy - self.robot_y)
-        yaw_err = abs(self.normalize_angle(math.atan2(wy - self.robot_y, wx - self.robot_x) - self.robot_yaw))
-        score = dist + 0.4 * yaw_err - min(len(cluster), 50) * 0.03
+        yaw_err = abs(self.normalize_angle(
+            math.atan2(wy - self.robot_y, wx - self.robot_x) - self.robot_yaw
+        ))
+
+        score = (
+            1.6 * dist +
+            0.5 * yaw_err -
+            min(len(cluster), 100) * 0.08
+        )
         return score, goal, cid, len(cluster)
 
     def find_best_frontier_goal(self):
         self.cleanup_rejections()
+        self.cleanup_rejected_positions()
+
         best, best_score = None, float('inf')
 
         for cluster in self.find_frontier_clusters():
@@ -268,6 +418,9 @@ class FrontierExplorer(Node):
 
         return best
 
+    # =========================================================
+    # Nav2 goal handling
+    # =========================================================
     def send_nav_goal(self, x, y):
         if not self.nav_client.wait_for_server(timeout_sec=2.0):
             self.get_logger().warn('Nav2 action server not available')
@@ -323,22 +476,178 @@ class FrontierExplorer(Node):
         self.goal_x = self.goal_y = self.goal_cluster_id = None
 
     def check_stuck(self):
-        if self.goal_x is None:
+        if self.goal_x is None or self.robot_x is None or self.robot_y is None:
             return
 
         now = time.time()
         if self.last_progress_x is None:
-            self.last_progress_x, self.last_progress_y, self.last_progress_time = self.robot_x, self.robot_y, now
+            self.last_progress_x = self.robot_x
+            self.last_progress_y = self.robot_y
+            self.last_progress_time = now
             return
 
         moved = math.hypot(self.robot_x - self.last_progress_x, self.robot_y - self.last_progress_y)
         if moved > self.min_progress_dist:
-            self.last_progress_x, self.last_progress_y, self.last_progress_time = self.robot_x, self.robot_y, now
+            self.last_progress_x = self.robot_x
+            self.last_progress_y = self.robot_y
+            self.last_progress_time = now
         elif self.goal_active and now - self.last_progress_time > self.progress_check_period:
             self.get_logger().info('Robot appears stuck; dropping current frontier cluster')
             self.reject_current_cluster()
-            self.last_progress_x, self.last_progress_y, self.last_progress_time = self.robot_x, self.robot_y, now
+            self.last_progress_x = self.robot_x
+            self.last_progress_y = self.robot_y
+            self.last_progress_time = now
 
+    # =========================================================
+    # Wall-follow helpers
+    # =========================================================
+    def set_mode(self, new_mode: str):
+        if new_mode != self.mode:
+            self.mode = new_mode
+            self.mode_since = time.time()
+            self.get_logger().info(f'Mode -> {self.mode}')
+
+    def set_wall_state(self, new_state: str):
+        if new_state != self.wall_state:
+            self.wall_state = new_state
+            self.wall_state_since = time.time()
+            self.get_logger().info(f'Wall state -> {self.wall_state}')
+
+    def wall_state_elapsed(self) -> float:
+        return time.time() - self.wall_state_since
+
+    def sanitize_range(self, r: float) -> float:
+        if math.isinf(r) or math.isnan(r):
+            return self.max_range_cap
+        return min(r, self.max_range_cap)
+
+    def min_in_sector(self, msg: LaserScan, angle_min: float, angle_max: float) -> float:
+        vals = []
+        angle = msg.angle_min
+        for r in msg.ranges:
+            if angle_min <= angle <= angle_max:
+                vals.append(self.sanitize_range(r))
+            angle += msg.angle_increment
+        return min(vals) if vals else self.max_range_cap
+
+    def compute_follow_cmd(self) -> Twist:
+        cmd = Twist()
+
+        now = time.time()
+        dt = max(now - self.prev_wall_time, 1e-3)
+        self.prev_wall_time = now
+
+        error = self.desired_right_dist - self.right_dist
+        derivative = (error - self.prev_error) / dt
+        self.prev_error = error
+
+        turn = self.kp * error + self.kd * derivative
+        turn = max(min(turn, self.max_follow_angular), -self.max_follow_angular)
+
+        if self.front_right_dist < 0.55:
+            cmd.linear.x = 0.07
+            cmd.angular.z = max(0.18, turn + 0.08)
+        else:
+            cmd.linear.x = self.linear_follow
+            cmd.angular.z = turn
+
+        return cmd
+
+    def compute_turn_cmd(self) -> Twist:
+        cmd = Twist()
+        cmd.linear.x = 0.0
+        cmd.angular.z = self.angular_turn
+        return cmd
+
+    def compute_search_cmd(self) -> Twist:
+        cmd = Twist()
+        cmd.linear.x = self.linear_search
+        cmd.angular.z = self.angular_search
+        return cmd
+
+    def decide_wall_state(self):
+        front_blocked = self.front_dist < self.front_block_enter
+        front_clear = self.front_dist > self.front_block_exit
+
+        wall_lost = self.right_dist > self.wall_lost_enter
+        wall_found = self.right_dist < self.wall_lost_exit
+
+        if self.wall_state == 'TURN_LEFT_AT_CORNER':
+            if self.wall_state_elapsed() < self.min_state_time:
+                return
+            if front_clear:
+                if wall_found:
+                    self.set_wall_state('FOLLOW_WALL')
+                else:
+                    self.set_wall_state('SEARCH_FOR_WALL')
+            return
+
+        if self.wall_state == 'SEARCH_FOR_WALL':
+            if self.wall_state_elapsed() < self.min_state_time:
+                if front_blocked:
+                    self.set_wall_state('TURN_LEFT_AT_CORNER')
+                return
+
+            if front_blocked:
+                self.set_wall_state('TURN_LEFT_AT_CORNER')
+            elif wall_found:
+                self.set_wall_state('FOLLOW_WALL')
+            return
+
+        if front_blocked:
+            self.set_wall_state('TURN_LEFT_AT_CORNER')
+        elif wall_lost:
+            self.set_wall_state('SEARCH_FOR_WALL')
+        else:
+            self.set_wall_state('FOLLOW_WALL')
+
+    def run_wall_follow(self):
+        cmd = Twist()
+
+        if not self.scan_ok:
+            self.cmd_pub.publish(cmd)
+            return
+
+        self.decide_wall_state()
+
+        if self.wall_state == 'TURN_LEFT_AT_CORNER':
+            cmd = self.compute_turn_cmd()
+        elif self.wall_state == 'SEARCH_FOR_WALL':
+            cmd = self.compute_search_cmd()
+        else:
+            cmd = self.compute_follow_cmd()
+
+        self.cmd_pub.publish(cmd)
+
+    def stop_robot(self):
+        self.cmd_pub.publish(Twist())
+
+    def should_use_wall_follow(self) -> bool:
+        if not self.scan_ok:
+            return False
+
+        if self.front_dist < self.wall_follow_enter_front:
+            return True
+        if self.right_dist < self.wall_follow_enter_right:
+            return True
+
+        return False
+
+    def should_leave_wall_follow(self) -> bool:
+        if not self.scan_ok:
+            return False
+
+        if time.time() - self.mode_since < self.wall_follow_min_time:
+            return False
+
+        return (
+            self.front_dist > self.wall_follow_exit_front and
+            self.right_dist > self.wall_follow_exit_right
+        )
+
+    # =========================================================
+    # Main control loop
+    # =========================================================
     def control_loop(self):
         if None in (self.map_data, self.robot_x, self.robot_y, self.robot_yaw):
             now = time.time()
@@ -348,10 +657,39 @@ class FrontierExplorer(Node):
                     missing.append(self.map_topic)
                 if self.robot_x is None or self.robot_y is None or self.robot_yaw is None:
                     missing.append(self.odom_topic)
+                if not self.scan_ok:
+                    missing.append(self.scan_topic)
                 self.get_logger().info(f'Waiting for: {", ".join(missing)}')
                 self.last_log_time = now
             return
 
+        if self.traffic_stop:
+            self.cancel_current_goal()
+            self.stop_robot()
+            return
+
+        # ----- Mode switching -----
+        if self.mode == 'EXPLORE_WITH_NAV2' and self.should_use_wall_follow():
+            self.get_logger().info('Switching from Nav2 to right-wall-follow')
+            self.cancel_current_goal()
+            self.set_wall_state('SEARCH_FOR_WALL')
+            self.set_mode('FOLLOW_RIGHT_WALL')
+
+        elif self.mode == 'FOLLOW_RIGHT_WALL' and self.should_leave_wall_follow():
+            self.get_logger().info('Leaving wall-follow, returning to frontier exploration')
+            self.stop_robot()
+            self.reject_frontiers_near_current_pose()
+            self.set_mode('EXPLORE_WITH_NAV2')
+            self.goal_x = None
+            self.goal_y = None
+            self.goal_cluster_id = None
+
+        # ----- Wall-follow mode -----
+        if self.mode == 'FOLLOW_RIGHT_WALL':
+            self.run_wall_follow()
+            return
+
+        # ----- Nav2 frontier mode -----
         self.check_stuck()
 
         if self.goal_active:
@@ -380,12 +718,14 @@ class FrontierExplorer(Node):
             f'cluster={self.goal_cluster_id}, size={cluster_size}'
         )
 
-        self.last_progress_x, self.last_progress_y, self.last_progress_time = self.robot_x, self.robot_y, time.time()
+        self.last_progress_x = self.robot_x
+        self.last_progress_y = self.robot_y
+        self.last_progress_time = time.time()
         self.send_nav_goal(self.goal_x, self.goal_y)
 
 
 def main(args=None):
-    print('Starting Nav2 frontier explorer...')
+    print('Starting hybrid frontier explorer...')
     rclpy.init(args=args)
     node = FrontierExplorer()
     rclpy.spin(node)
